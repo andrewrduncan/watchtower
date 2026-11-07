@@ -1,5 +1,7 @@
 # Builds this fork's image: nicholas-fedor/watchtower's latest release with the
-# per-container-schedule branch on top, tested, pushed to ghcr.io.
+# per-container-schedule branch on top, tested, pushed to ghcr.io. When the
+# feature needs upstream changes newer than the release, it is built on
+# upstream's main instead (the image tag says which).
 #
 # Nothing is pushed to the repository: the feature is rebased onto the release
 # inside the runner. When it no longer applies cleanly, or the tests fail, an
@@ -45,18 +47,36 @@ jobs:
           ref: ${{ env.FEATURE }}
           fetch-depth: 0
 
-      - name: Find upstream's latest release
+      - name: Choose the base (upstream's latest release, else its main)
         id: base
         run: |
+          git config user.name "fork-build"
+          git config user.email "fork-build@users.noreply.github.com"
           git remote add upstream "$UPSTREAM"
           git fetch --quiet --tags upstream main
           tag=$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
           feature=$(git rev-parse --short=7 HEAD)
-          key="${tag}-schedules.${feature}"
+          fork_point=$(git merge-base HEAD upstream/main)
+          # Does the feature apply to the release? (tried on a scratch branch)
+          git checkout --quiet -b probe HEAD
+          if git rebase --quiet --onto "$tag" "$fork_point" > /dev/null 2>&1; then
+            base="$tag"
+            key="${tag}-schedules.${feature}"
+          else
+            git rebase --abort > /dev/null 2>&1 || true
+            main=$(git rev-parse --short=7 upstream/main)
+            base="upstream/main"
+            key="${tag}-main.${main}-schedules.${feature}"
+            echo "The feature needs upstream changes newer than $tag: building on main ($main)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          git checkout --quiet "$FEATURE"
+          git branch --quiet -D probe
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "fork_point=$fork_point" >> "$GITHUB_OUTPUT"
           echo "feature=$feature" >> "$GITHUB_OUTPUT"
           echo "key=$key" >> "$GITHUB_OUTPUT"
-          echo "Upstream release $tag, feature $feature: image tag $key" >> "$GITHUB_STEP_SUMMARY"
+          echo "Base $base, feature $feature: image tag $key" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Skip if already built
         id: built
@@ -67,21 +87,18 @@ jobs:
             echo "Already built: nothing to do." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Rebase the feature onto the release
+      - name: Rebase the feature onto the base
         id: rebase
         if: steps.built.outputs.skip != 'true'
         run: |
-          git config user.name "fork-build"
-          git config user.email "fork-build@users.noreply.github.com"
-          base=$(git merge-base HEAD upstream/main)
-          if ! git rebase --onto "${{ steps.base.outputs.tag }}" "$base" > rebase.log 2>&1; then
+          if ! git rebase --onto "${{ steps.base.outputs.base }}" "${{ steps.base.outputs.fork_point }}" > rebase.log 2>&1; then
             git diff --name-only --diff-filter=U > conflicts.txt || true
             git rebase --abort || true
             echo "stage=rebase" >> "$GITHUB_OUTPUT"
             cat rebase.log
             exit 1
           fi
-          git log --oneline "${{ steps.base.outputs.tag }}..HEAD"
+          git log --oneline "${{ steps.base.outputs.base }}..HEAD"
 
       - name: Set up Go
         if: steps.built.outputs.skip != 'true'
@@ -136,7 +153,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.base.outputs.feature }}
             org.opencontainers.image.version=${{ steps.base.outputs.key }}
-            org.opencontainers.image.description=Watchtower ${{ steps.base.outputs.tag }} with per-container schedules
+            org.opencontainers.image.description=Watchtower (${{ steps.base.outputs.base }}) with per-container schedules
 
       - name: Close the alert
         if: success()
@@ -152,7 +169,7 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.base.outputs.tag }}
+          TAG: ${{ steps.base.outputs.base }}
           STAGE: ${{ steps.rebase.outputs.stage || steps.test.outputs.stage || 'build' }}
         run: |
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
