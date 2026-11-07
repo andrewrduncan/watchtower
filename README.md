@@ -196,7 +196,8 @@ Pin a specific tag if you want to choose when Watchtower itself changes.
 - `per-container-schedule` is the feature, on upstream's `main`. It is what's
   offered upstream as a pull request.
 - `fork` (the default branch) holds this README and the build.
-- `main` is upstream's `main`, untouched.
+- `main` mirrors upstream's `main`, kept identical every hour by
+  [`sync-main.yml`](.github/workflows/sync-main.yml).
 
 [`fork-build.yml`](.github/workflows/fork-build.yml) runs every day, and by
 hand. It takes upstream's latest release (or its `main`, when the feature needs

@@ -1,0 +1,62 @@
+# Keeps this fork's main identical to upstream's main (nicholas-fedor/watchtower).
+#
+# main is a mirror: nothing is committed to it here, so every sync is a fast
+# forward. Upstream's commits often change its own workflow files, which the
+# built-in GITHUB_TOKEN may not push, so this uses the SYNC_TOKEN secret: a
+# fine-grained token for this repository with Contents and Workflows (read and
+# write). Without it the sync is skipped, with a note in the run's summary.
+name: Sync main with upstream
+
+on:
+  schedule:
+    - cron: "41 * * * *" # hourly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check for the token
+        id: token
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::No SYNC_TOKEN secret: main was not synced. See the comment at the top of sync-main.yml." 
+            echo "Skipped: add the SYNC_TOKEN secret to sync main." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check out main
+        if: steps.token.outputs.missing != 'true'
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Fast-forward to upstream's main
+        if: steps.token.outputs.missing != 'true'
+        run: |
+          git remote add upstream https://github.com/nicholas-fedor/watchtower.git
+          git fetch --quiet upstream main
+          before=$(git rev-parse --short HEAD)
+          after=$(git rev-parse --short upstream/main)
+          if [ "$before" = "$after" ]; then
+            echo "main is current ($after)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor HEAD upstream/main; then
+            echo "::error::main has commits upstream doesn't: it should be a pure mirror. Not syncing."
+            exit 1
+          fi
+          git push origin upstream/main:main
+          echo "main: $before → $after ($(git rev-list --count HEAD..upstream/main) commits)" >> "$GITHUB_STEP_SUMMARY"
