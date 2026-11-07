@@ -208,7 +208,7 @@ the result before publishing the image:
 - golangci-lint with its configuration;
 - govulncheck, for known vulnerabilities the code calls;
 - gosec, the security scanner. Upstream runs it in report-only mode and has
-  findings of its own, so only findings in files this fork changes stop the
+  findings of its own, so only findings on lines this fork adds stop the
   build; the rest are listed in the run's summary. A build that already exists is skipped. Everything
 happens on GitHub.
 

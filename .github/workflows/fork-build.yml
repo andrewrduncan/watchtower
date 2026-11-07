@@ -139,21 +139,31 @@ jobs:
         if: steps.built.outputs.skip != 'true'
         run: |
           go run github.com/securego/gosec/v2/cmd/gosec@latest -quiet -exclude-generated -no-fail -fmt=json -out gosec.json ./... || true
-          git diff --name-only "${{ steps.base.outputs.base }}..HEAD" -- '*.go' > changed.txt
+          # The lines this fork adds: only findings on them stop the build.
+          git diff --unified=0 "${{ steps.base.outputs.base }}..HEAD" -- '*.go' > added.diff
           python3 - <<'PY'
-          import json, os
-          findings = json.load(open("gosec.json")).get("Issues") or []
-          changed = {line.strip() for line in open("changed.txt") if line.strip()}
+          import json, os, re
           root = os.getcwd() + "/"
-          ours = [f for f in findings if f["file"].replace(root, "") in changed]
+          added, current = {}, None
+          for line in open("added.diff"):
+              if line.startswith("+++ "):
+                  current = line[6:].strip() if line.startswith("+++ b/") else None
+              elif line.startswith("@@") and current:
+                  start, _, count = re.match(r"@@ -\S+ \+(\d+)(,(\d+))? @@", line).groups()
+                  n = 1 if count is None else int(count)
+                  added.setdefault(current, set()).update(range(int(start), int(start) + n))
+          findings = json.load(open("gosec.json")).get("Issues") or []
+          def place(f):
+              return f["file"].replace(root, ""), int(str(f["line"]).split("-")[0])
+          ours = [f for f in findings if place(f)[1] in added.get(place(f)[0], ())]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-              summary.write(f"gosec: {len(ours)} finding(s) in this fork's files, "
-                            f"{len(findings) - len(ours)} in upstream's (report only).\n")
-          for f in ours:
-              print(f"::error file={f['file'].replace(root, '')},line={f['line']}::gosec {f['rule_id']}: {f['details']}")
+              summary.write(f"gosec: {len(ours)} finding(s) on lines this fork adds, "
+                            f"{len(findings) - len(ours)} in upstream's code (report only).\n")
           with open("gosec-ours.txt", "w") as out:
               for f in ours:
-                  out.write(f"{f['file'].replace(root, '')}:{f['line']} {f['rule_id']} {f['details']}\n")
+                  path, line = place(f)
+                  print(f"::error file={path},line={line}::gosec {f['rule_id']}: {f['details']}")
+                  out.write(f"{path}:{line} {f['rule_id']} {f['details']}\n")
           raise SystemExit(1 if ours else 0)
           PY
 
@@ -274,5 +284,5 @@ jobs:
             gh issue comment "$open" --repo "$GITHUB_REPOSITORY" --body-file alert.md
           else
             gh issue create --repo "$GITHUB_REPOSITORY" --label "$ALERT_LABEL" --assignee "$GITHUB_REPOSITORY_OWNER" \
-              --title "Fork build: $FEATURE no longer builds on upstream $TAG" --body-file alert.md
+              --title "Fork build failed ($STAGE): $FEATURE on $TAG" --body-file alert.md
           fi
