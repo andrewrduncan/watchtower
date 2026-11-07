@@ -1,0 +1,196 @@
+# Builds this fork's image: nicholas-fedor/watchtower's latest release with the
+# per-container-schedule branch on top, tested, pushed to ghcr.io.
+#
+# Nothing is pushed to the repository: the feature is rebased onto the release
+# inside the runner. When it no longer applies cleanly, or the tests fail, an
+# issue labeled "sync-conflict" is opened (or updated) and assigned to the
+# owner; a later successful build closes it.
+name: Fork build
+
+on:
+  schedule:
+    - cron: "17 9 * * *" # daily: picks up a new upstream release
+  push:
+    branches: [fork] # (a push to the feature branch runs upstream's own checks; this runs daily or by hand)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if this release and feature were built before
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  issues: write
+
+concurrency:
+  group: fork-build
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/nicholas-fedor/watchtower.git
+  FEATURE: per-container-schedule
+  IMAGE: ghcr.io/${{ github.repository_owner }}/watchtower
+  ALERT_LABEL: sync-conflict
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the feature
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.FEATURE }}
+          fetch-depth: 0
+
+      - name: Find upstream's latest release
+        id: base
+        run: |
+          git remote add upstream "$UPSTREAM"
+          git fetch --quiet --tags upstream main
+          tag=$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          feature=$(git rev-parse --short=7 HEAD)
+          key="${tag}-schedules.${feature}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "feature=$feature" >> "$GITHUB_OUTPUT"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "Upstream release $tag, feature $feature: image tag $key" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip if already built
+        id: built
+        if: inputs.force != true
+        run: |
+          if docker manifest inspect "$IMAGE:${{ steps.base.outputs.key }}" > /dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Already built: nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Rebase the feature onto the release
+        id: rebase
+        if: steps.built.outputs.skip != 'true'
+        run: |
+          git config user.name "fork-build"
+          git config user.email "fork-build@users.noreply.github.com"
+          base=$(git merge-base HEAD upstream/main)
+          if ! git rebase --onto "${{ steps.base.outputs.tag }}" "$base" > rebase.log 2>&1; then
+            git diff --name-only --diff-filter=U > conflicts.txt || true
+            git rebase --abort || true
+            echo "stage=rebase" >> "$GITHUB_OUTPUT"
+            cat rebase.log
+            exit 1
+          fi
+          git log --oneline "${{ steps.base.outputs.tag }}..HEAD"
+
+      - name: Set up Go
+        if: steps.built.outputs.skip != 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        id: test
+        if: steps.built.outputs.skip != 'true'
+        run: |
+          set -o pipefail
+          echo "stage=test" >> "$GITHUB_OUTPUT"
+          go test -timeout 20m ./... 2>&1 | tee test.log
+          go test -race -timeout 10m ./internal/update/schedule/... 2>&1 | tee -a test.log
+          echo "stage=" >> "$GITHUB_OUTPUT"
+
+      - name: Build the binaries
+        if: steps.built.outputs.skip != 'true'
+        run: |
+          version="${{ steps.base.outputs.key }}"
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X github.com/nicholas-fedor/watchtower/internal/meta.Version=$version" \
+              -o "dist/linux/$arch/watchtower" .
+          done
+
+      - name: Set up Docker Buildx
+        if: steps.built.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        if: steps.built.outputs.skip != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the image
+        if: steps.built.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: dist
+          file: build/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.base.outputs.key }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.base.outputs.feature }}
+            org.opencontainers.image.version=${{ steps.base.outputs.key }}
+            org.opencontainers.image.description=Watchtower ${{ steps.base.outputs.tag }} with per-container schedules
+
+      - name: Close the alert
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for n in $(gh issue list --repo "$GITHUB_REPOSITORY" --label "$ALERT_LABEL" --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --repo "$GITHUB_REPOSITORY" \
+              --comment "Fixed: built ${{ steps.base.outputs.key }} in $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          done
+
+      - name: Raise the alert
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.base.outputs.tag }}
+          STAGE: ${{ steps.rebase.outputs.stage || steps.test.outputs.stage || 'build' }}
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          {
+            echo "The fork build failed at the **$STAGE** stage, building \`$FEATURE\` on upstream **$TAG**."
+            echo
+            if [ "$STAGE" = rebase ] && [ -s conflicts.txt ]; then
+              echo "Files in conflict:"
+              echo
+              sed 's/^/- `/; s/$/`/' conflicts.txt
+              echo
+            fi
+            if [ "$STAGE" = test ] && [ -s test.log ]; then
+              echo "Failures:"
+              echo
+              echo '```'
+              grep -E -- '^(--- FAIL|FAIL|panic:)' test.log | head -40
+              echo '```'
+              echo
+            fi
+            echo "Run: $run_url"
+            echo
+            echo "To reproduce:"
+            echo
+            echo '```sh'
+            echo "git fetch upstream --tags && git checkout $FEATURE"
+            echo "git rebase --onto $TAG \$(git merge-base HEAD upstream/main)"
+            echo "go test ./..."
+            echo '```'
+            echo
+            echo "Until it's fixed, the last good image stays on ghcr.io. This issue closes itself after the next successful build."
+          } > alert.md
+          gh label create "$ALERT_LABEL" --repo "$GITHUB_REPOSITORY" --color B60205 \
+            --description "The fork build can't apply or test the feature on upstream" --force
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "$ALERT_LABEL" --state open --json number --jq '.[0].number')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --repo "$GITHUB_REPOSITORY" --body-file alert.md
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --label "$ALERT_LABEL" --assignee "$GITHUB_REPOSITORY_OWNER" \
+              --title "Fork build: $FEATURE no longer builds on upstream $TAG" --body-file alert.md
+          fi
