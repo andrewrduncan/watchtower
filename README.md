@@ -201,8 +201,15 @@ Pin a specific tag if you want to choose when Watchtower itself changes.
 
 [`fork-build.yml`](.github/workflows/fork-build.yml) runs every day, and by
 hand. It takes upstream's latest release (or its `main`, when the feature needs
-newer changes), rebases the feature onto it, runs upstream's full test suite,
-and publishes the image. A build that already exists is skipped. Everything
+newer changes), rebases the feature onto it, and runs upstream's own checks on
+the result before publishing the image:
+
+- its full test suite;
+- golangci-lint with its configuration;
+- govulncheck, for known vulnerabilities the code calls;
+- gosec, the security scanner. Upstream runs it in report-only mode and has
+  findings of its own, so only findings in files this fork changes stop the
+  build; the rest are listed in the run's summary. A build that already exists is skipped. Everything
 happens on GitHub.
 
 When the feature no longer applies cleanly to upstream, or a test fails, the

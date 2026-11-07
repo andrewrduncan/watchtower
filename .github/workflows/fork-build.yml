@@ -116,6 +116,47 @@ jobs:
           go test -race -timeout 10m ./internal/update/schedule/... 2>&1 | tee -a test.log
           echo "stage=" >> "$GITHUB_OUTPUT"
 
+      # Upstream's own quality and security checks, on the code being shipped:
+      # its linter and config, govulncheck, and gosec. Upstream runs gosec in
+      # report-only mode and has findings of its own, so only findings in files
+      # this fork changes fail the build; the rest are listed in the summary.
+      - name: Lint (upstream's golangci-lint config)
+        id: lint
+        if: steps.built.outputs.skip != 'true'
+        uses: golangci/golangci-lint-action@v9
+        with:
+          args: --timeout=10m --config=build/golangci-lint/golangci-lint.yaml
+
+      - name: Check for known vulnerabilities (govulncheck)
+        id: vuln
+        if: steps.built.outputs.skip != 'true'
+        run: |
+          set -o pipefail
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./... 2>&1 | tee vuln.log
+
+      - name: Security scan (gosec)
+        id: gosec
+        if: steps.built.outputs.skip != 'true'
+        run: |
+          go run github.com/securego/gosec/v2/cmd/gosec@latest -quiet -exclude-generated -no-fail -fmt=json -out gosec.json ./... || true
+          git diff --name-only "${{ steps.base.outputs.base }}..HEAD" -- '*.go' > changed.txt
+          python3 - <<'PY'
+          import json, os
+          findings = json.load(open("gosec.json")).get("Issues") or []
+          changed = {line.strip() for line in open("changed.txt") if line.strip()}
+          root = os.getcwd() + "/"
+          ours = [f for f in findings if f["file"].replace(root, "") in changed]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"gosec: {len(ours)} finding(s) in this fork's files, "
+                            f"{len(findings) - len(ours)} in upstream's (report only).\n")
+          for f in ours:
+              print(f"::error file={f['file'].replace(root, '')},line={f['line']}::gosec {f['rule_id']}: {f['details']}")
+          with open("gosec-ours.txt", "w") as out:
+              for f in ours:
+                  out.write(f"{f['file'].replace(root, '')}:{f['line']} {f['rule_id']} {f['details']}\n")
+          raise SystemExit(1 if ours else 0)
+          PY
+
       - name: Build the binaries
         if: steps.built.outputs.skip != 'true'
         run: |
@@ -170,7 +211,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.base.outputs.base }}
-          STAGE: ${{ steps.rebase.outputs.stage || steps.test.outputs.stage || 'build' }}
+          STAGE: >-
+            ${{ steps.rebase.outputs.stage || steps.test.outputs.stage
+            || (steps.lint.outcome == 'failure' && 'lint')
+            || (steps.vuln.outcome == 'failure' && 'vulnerability check')
+            || (steps.gosec.outcome == 'failure' && 'security scan') || 'build' }}
         run: |
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           {
@@ -180,6 +225,26 @@ jobs:
               echo "Files in conflict:"
               echo
               sed 's/^/- `/; s/$/`/' conflicts.txt
+              echo
+            fi
+            if [ "$STAGE" = "vulnerability check" ] && [ -s vuln.log ]; then
+              echo "Vulnerabilities the code calls:"
+              echo
+              echo '```'
+              grep -E '^(Vulnerability|  [A-Z])' vuln.log | head -40
+              echo '```'
+              echo
+            fi
+            if [ "$STAGE" = "security scan" ] && [ -s gosec-ours.txt ]; then
+              echo "gosec findings in this fork's files:"
+              echo
+              echo '```'
+              cat gosec-ours.txt
+              echo '```'
+              echo
+            fi
+            if [ "$STAGE" = lint ]; then
+              echo "The linter's findings are in the run's annotations."
               echo
             fi
             if [ "$STAGE" = test ] && [ -s test.log ]; then
