@@ -200,7 +200,12 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ steps.base.outputs.key }}
+          # com.centurylinklabs.watchtower=true is how Watchtower knows its own
+          # container: without it a self-update stops itself as if it were any
+          # other container and nothing starts the new one (upstream sets it in
+          # its release Dockerfiles, not in build/docker/Dockerfile)
           labels: |
+            com.centurylinklabs.watchtower=true
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.base.outputs.feature }}
             org.opencontainers.image.version=${{ steps.base.outputs.key }}
