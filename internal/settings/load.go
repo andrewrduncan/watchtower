@@ -165,6 +165,7 @@ func loadSchedule(vCfg *viper.Viper) schedule.Schedule {
 		UpdateOnStart:   vCfg.GetBool("update-on-start"),
 
 		ContainerSchedules: vCfg.GetBool("container-schedules"),
+		WatchEvents:        vCfg.GetBool("watch-events"),
 	}
 }
 

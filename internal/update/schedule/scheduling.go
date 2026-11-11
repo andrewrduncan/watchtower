@@ -206,6 +206,10 @@ type ScheduleDeps struct {
 	// After that the labels are read from each update session's own listing.
 	// Nil keeps every container on the global schedule.
 	ContainerSchedules ListContainers
+	// ContainerChanges, when set, follows container changes (--watch-events):
+	// a container started between scheduled runs is then checked for updates
+	// as soon as it starts. Nil checks new containers at the next run.
+	ContainerChanges ContainerChanges
 }
 
 // updatesOnStart reports whether the scheduler makes an update at startup.
@@ -377,6 +381,11 @@ func RunUpgradesOnSchedule(ctx context.Context, deps ScheduleDeps) error {
 		}
 	}
 
+	// Containers started between scheduled runs, checked as they start.
+	stopStartedChecks := watchStarted(ctx, log, deps.ContainerChanges, func(due filters.Filter) {
+		updateFunc(false, true, due)
+	})
+
 	// Start the scheduler to begin periodic execution if scheduling is enabled.
 	// Only start if a schedule spec was provided (empty string means no scheduling).
 	if scheduleSpec != "" || containers != nil {
@@ -389,6 +398,7 @@ func RunUpgradesOnSchedule(ctx context.Context, deps ScheduleDeps) error {
 
 	// Stop the scheduler and wait for any running update to complete.
 	scheduler.Stop()
+	stopStartedChecks()
 	log.Debug().Msg("Waiting for running update to be finished...")
 
 	// Original ctx is often already canceled at shutdown. Detach cancel and

@@ -23,6 +23,7 @@ import (
 	"github.com/nicholas-fedor/watchtower/internal/container"
 	containerClient "github.com/nicholas-fedor/watchtower/internal/container/client"
 	"github.com/nicholas-fedor/watchtower/internal/container/filters"
+	"github.com/nicholas-fedor/watchtower/internal/container/watch"
 	"github.com/nicholas-fedor/watchtower/internal/git"
 	"github.com/nicholas-fedor/watchtower/internal/meta"
 	"github.com/nicholas-fedor/watchtower/internal/observability/events"
@@ -935,6 +936,7 @@ func (p *process) runMain(cfg settings.RunConfig) error {
 		ReplacedOlderInstance: totalRemovedInstances > 0,
 		BaseParams:            sharedBase,
 		ContainerSchedules:    schedule.ListFrom(appCfg.Schedule.ContainerSchedules, client),
+		ContainerChanges:      watch.FromClient(appCfg.Schedule.WatchEvents, client, p.log),
 	})
 
 	// Stop the HTTP API and give it its shutdown grace period to finish the

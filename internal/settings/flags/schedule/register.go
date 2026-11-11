@@ -48,6 +48,14 @@ func Specs() []spec.FlagSpec {
 			Help: "Let containers set their own update schedule with the " +
 				"com.centurylinklabs.watchtower.schedule label",
 		},
+		{
+			Name:    "watch-events",
+			Kind:    spec.KindBool,
+			Default: false,
+			EnvKeys: []string{"WATCHTOWER_WATCH_EVENTS"},
+			Help: "Follow Docker's container events, and check a new container for updates " +
+				"as soon as it starts instead of at the next scheduled run",
+		},
 	}
 }
 
