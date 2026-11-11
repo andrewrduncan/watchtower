@@ -2,9 +2,14 @@
 
 This is a fork of [Watchtower](https://github.com/nicholas-fedor/watchtower),
 which automatically updates running Docker containers when their images change.
-It adds one feature: **a container can set its own update schedule**, so you
-can check some containers every few minutes and leave the rest on a daily
-schedule, all with one Watchtower.
+It adds two features, each optional and off by default:
+
+- **Container schedules:** a container can set its own update schedule, so you
+  can check some containers every few minutes and leave the rest on a daily
+  schedule, all with one Watchtower.
+- **Watch events:** Watchtower follows Docker's container events, so a
+  container you create or recreate is checked straight away, and a new
+  container's schedule label takes effect at once.
 
 Everything else is upstream Watchtower, unchanged, and its
 [documentation](https://watchtower.nickfedor.com/) applies in full.
@@ -28,8 +33,8 @@ going. This fork adds a few hundred lines to their work.
 
 If this feature is useful to you, please star and support
 [the upstream project](https://github.com/nicholas-fedor/watchtower). The goal
-is for this fork not to need to exist: the feature is offered upstream, for
-[issue #1589](https://github.com/nicholas-fedor/watchtower/issues/1589).
+is for this fork not to need to exist: both features are being offered
+upstream, for [issue #1589](https://github.com/nicholas-fedor/watchtower/issues/1589).
 
 ## What it adds
 
@@ -42,8 +47,10 @@ With this fork:
 
 - Turn on `--container-schedules` (or `WATCHTOWER_CONTAINER_SCHEDULES=true`).
 - Label a container `com.centurylinklabs.watchtower.schedule` with a schedule.
-- That container is updated on its own schedule and left out of the global
-  one. Every other container carries on as before.
+- That container is checked for updates on its own schedule, and the global
+  schedule checks the rest.
+- Optionally, turn on `--watch-events` (or `WATCHTOWER_WATCH_EVENTS=true`) so
+  changes are picked up the moment they happen.
 
 ## Usage
 
@@ -58,6 +65,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - WATCHTOWER_CONTAINER_SCHEDULES=true
+      - WATCHTOWER_WATCH_EVENTS=true
       - WATCHTOWER_SCHEDULE=0 0 4 * * *      # everything else: daily at 4am
       - WATCHTOWER_CLEANUP=true
 
@@ -82,24 +90,22 @@ services:
 $ docker run --detach --name watchtower \
     --volume /var/run/docker.sock:/var/run/docker.sock \
     ghcr.io/andrewrduncan/watchtower:latest \
-    --container-schedules --schedule "0 0 4 * * *"
+    --container-schedules --watch-events --schedule "0 0 4 * * *"
 
 $ docker run --detach --name my-app \
     --label "com.centurylinklabs.watchtower.schedule=@every 10m" \
     ghcr.io/example/my-app:latest
 ```
 
-### The option
+### The options
 
-| | |
-|---|---|
-| Argument | `--container-schedules` |
-| Environment variable | `WATCHTOWER_CONTAINER_SCHEDULES` |
-| Type | Boolean |
-| Default | `false` |
+| Argument | Environment variable | Default | What it does |
+|---|---|---|---|
+| `--container-schedules` | `WATCHTOWER_CONTAINER_SCHEDULES` | `false` | Containers follow their schedule label |
+| `--watch-events` | `WATCHTOWER_WATCH_EVENTS` | `false` | Follow Docker's container events |
 
-It is off by default. With it off, this fork behaves exactly like upstream: no
-label is read and no extra connection to Docker is opened.
+Each works without the other. With both off, this fork behaves exactly like
+upstream.
 
 ### The label
 
@@ -118,9 +124,20 @@ works.
 
 ## How it behaves
 
-- **One run per schedule.** Containers that share a schedule are checked
-  together in one run. Each run covers only its own containers, and the global
-  schedule's runs leave all labeled containers out.
+### Container schedules
+
+- **Every run is an ordinary Watchtower run.** It covers all the containers
+  Watchtower manages, as upstream's scheduled run does, but checks for new
+  images only the containers whose schedule fired. Schedules that fire at the
+  same moment, the global one included, share one run.
+- **Dependencies work exactly as upstream.** When a container is updated, the
+  containers that depend on it (links, `network_mode: container:`,
+  `depends-on` labels, Compose `depends_on`) restart with it, in dependency
+  order, whatever their own schedule. They are not checked for new images
+  until their own schedule fires.
+- **Labels are read from the container list each run already makes**, at
+  startup and after every run. Without `--watch-events`, a new label takes
+  effect after the next run of any schedule. Nothing polls in between.
 - **The rest of your configuration still applies.** A labeled container
   outside this Watchtower's [scope](https://watchtower.nickfedor.com/configuration/container-selection/#scope_filter),
   or not enabled while
@@ -129,54 +146,42 @@ works.
   notifications.
 - **One update at a time.** Runs never overlap: a run that comes due while
   another is going waits for it, as upstream's scheduled runs do.
-- **No global schedule needed.** With only `--container-schedules`, labeled
-  containers update on their own schedules and the rest are not updated on a
-  schedule.
+- **No global schedule needed.** With only `--container-schedules` and no
+  `--schedule`, labeled containers update on their own schedules and the rest
+  are not updated on a schedule.
 - **Invalid schedules are skipped safely.** A label that doesn't parse is
   logged as a warning and the container stays on the global schedule.
 - **The HTTP API is unchanged.** An update request covers every container it
   selects, whatever its schedule.
 
-### Changes take effect at once, with nothing polled
+### Watch events
 
-Watchtower follows Docker's container events. It lists the containers once at
-startup, then hears about each container as it is created, removed or renamed.
-Add a label (by recreating the container, as any label change requires) and its
-schedule starts straight away. Remove the last container on a schedule and the
-schedule goes. Between events and due runs, nothing runs.
-
-### It recovers on its own
-
-A connection held open for days has to survive things going wrong:
-
-- **Docker restarts, or the connection drops:** Watchtower reconnects, waiting
-  1, 2, 4… seconds up to a minute, then lists the containers again, since
-  events missed meanwhile are not replayed.
-- **A connection that dies without an error** (possible with a remote Docker
-  over a network): after every update run the containers are listed again, so
-  anything missed is caught at the next run. This adds no polling.
-- **Quiet logs:** a single dropped connection that reconnects straight away is
-  routine (a Docker restart, a proxy's idle timeout) and logged at debug level.
-  Watchtower warns only when reconnecting keeps failing, and logs when it has
-  recovered.
-- **Faults stay contained:** if the event listener ever fails or panics, it is
-  logged and restarted. The rest of Watchtower keeps working throughout, and
-  labeled containers simply wait until their schedules are back.
-
-### Requirements
-
-- Access to Docker's event stream, which a mounted Docker socket gives. Behind
-  a socket proxy, allow events, for example `EVENTS=1` for
+- **New containers are checked straight away.** A container created or
+  recreated (by `docker compose up`, say) is checked for updates once no other
+  container has been created for 10 seconds, at most a minute after the
+  first, so a whole Compose project is checked in one run. Dependencies work
+  as above.
+- **Watchtower's own work is ignored.** Watchtower recreates the containers
+  it updates, which Docker reports as new. A container created while an update
+  runs, or just after, isn't checked again.
+- **With container schedules,** the labels are read again two seconds after
+  any container is created, removed or renamed, so a new schedule starts at
+  once.
+- **It recovers on its own.** When the event stream drops (Docker restarting,
+  say), Watchtower reconnects, waiting 1, 2, 4… seconds up to a minute, and
+  picks up from the last event it saw. A single drop is logged at debug level;
+  it warns only when reconnecting keeps failing.
+- **Requirements:** access to Docker's event stream, which a mounted Docker
+  socket gives. Behind a socket proxy, allow events, for example `EVENTS=1` for
   [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy).
-- Docker Engine with API v1.43 or later, as upstream.
 
 ### What you'll see in the logs
 
 ```text
-level=info msg="Containers with a schedule label follow their own schedule"
-level=info msg="Scheduled updates for containers with their own schedule" schedule="@every 10m"
-level=debug msg="Container follows its own schedule" container=my-app schedule="@every 10m"
-level=info msg="No containers left on a container schedule: removed it" schedule="@every 10m"
+level=info msg="Containers follow their own schedule" schedule="@every 10m"
+level=info msg="New containers are checked for updates as they are created"
+level=info msg="Checking new containers for updates" containers=["my-app"]
+level=debug msg="No container follows this schedule any more" schedule="@every 10m"
 ```
 
 ## Images
@@ -186,33 +191,37 @@ level=info msg="No containers left on a container schedule: removed it" schedule
 | Tag | What it is |
 |---|---|
 | `latest` | the newest build |
-| `v1.24.0-schedules.0abe15f` | upstream release v1.24.0 with the feature at commit `0abe15f` |
-| `v1.24.0-main.0eca64f-schedules.0abe15f` | upstream's `main` at `0eca64f` (newer than v1.24.0) with the feature, when the feature needs upstream changes not yet released |
+| `v1.24.0-schedules.0abe15f` | upstream release v1.24.0 with the features at commit `0abe15f` |
+| `v1.24.0-main.0eca64f-schedules.0abe15f` | upstream's `main` at `0eca64f` (newer than v1.24.0) with the features, when they need upstream changes not yet released |
 
 Pin a specific tag if you want to choose when Watchtower itself changes.
 
 ## How this fork is kept up to date
 
-- `per-container-schedule` is the feature, on upstream's `main`. It is what's
-  offered upstream as a pull request.
+- `container-schedules` and `container-events` are the two features, each on
+  upstream's `main` and independent of the other. They are what's offered
+  upstream.
+- `fork-features` is both, plus the small change that lets events refresh the
+  schedules. It is what the image is built from.
 - `fork` (the default branch) holds this README and the build.
 - `main` mirrors upstream's `main`, kept identical every hour by
   [`sync-main.yml`](.github/workflows/sync-main.yml).
 
 [`fork-build.yml`](.github/workflows/fork-build.yml) runs every day, and by
-hand. It takes upstream's latest release (or its `main`, when the feature needs
-newer changes), rebases the feature onto it, and runs upstream's own checks on
-the result before publishing the image:
+hand. It takes upstream's latest release (or its `main`, when the features need
+newer changes), rebases `fork-features` onto it, and runs upstream's own checks
+on the result before publishing the image:
 
 - its full test suite;
 - golangci-lint with its configuration;
 - govulncheck, for known vulnerabilities the code calls;
 - gosec, the security scanner. Upstream runs it in report-only mode and has
   findings of its own, so only findings on lines this fork adds stop the
-  build; the rest are listed in the run's summary. A build that already exists is skipped. Everything
-happens on GitHub.
+  build; the rest are listed in the run's summary.
 
-When the feature no longer applies cleanly to upstream, or a test fails, the
+A build that already exists is skipped. Everything happens on GitHub.
+
+When the features no longer apply cleanly to upstream, or a test fails, the
 build opens an issue labeled `sync-conflict`. The last good image stays
 published until it's fixed, and the next good build closes the issue.
 
@@ -220,14 +229,19 @@ published until it's fixed, and the next good build closes the issue.
 
 Watchtower is licensed under the [Apache License 2.0](https://github.com/nicholas-fedor/watchtower/blob/main/LICENSE.md),
 and so is this fork. Changes from upstream, all on the
-[`per-container-schedule`](https://github.com/andrewrduncan/watchtower/tree/per-container-schedule)
+[`fork-features`](https://github.com/andrewrduncan/watchtower/tree/fork-features)
 branch:
 
-- **New:** `internal/update/schedule/percontainer` (the label rules, the
-  registry of schedules, and the Docker event source, with their tests).
+- **New:**
+  - `internal/update/schedule/containers.go`: container schedules;
+  - `internal/update/schedule/created.go`: checking new containers;
+  - `internal/container/watch`: following Docker's container events;
+  - each with its tests.
 - **Changed:**
-  - the scheduler (`internal/update/schedule/scheduling.go`), to run container
-    schedules and supervise the event source;
+  - the update session (`internal/update/update.go`), which can check only the
+    containers that are due while keeping the rest in its dependency graph;
+  - the scheduler (`internal/update/schedule/scheduling.go`) and its update
+    lock, which records when it was last held;
   - its startup (`cmd/root.go`);
   - the Docker client, which gained an `Events` method;
   - the flag, setting and label definitions;
