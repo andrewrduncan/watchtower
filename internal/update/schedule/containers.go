@@ -13,6 +13,7 @@ import (
 	"github.com/nicholas-fedor/watchtower/internal/container"
 	"github.com/nicholas-fedor/watchtower/internal/container/filters"
 	"github.com/nicholas-fedor/watchtower/internal/container/labels"
+	"github.com/nicholas-fedor/watchtower/internal/container/watch"
 )
 
 // ListContainers lists every container, for container schedules to read their
@@ -29,6 +30,11 @@ const globalSchedule = ""
 
 // maxClaimedTicks bounds the fire times remembered as already run.
 const maxClaimedTicks = 16
+
+// changedSettleDelay is how long after the last container change the
+// schedule labels are read again, when container events are followed, so a
+// Compose project brought up together is read once.
+const changedSettleDelay = 2 * time.Second
 
 // containerSchedules gives each container with a schedule label its own cron
 // entry, one per distinct schedule, beside the global one.
@@ -65,6 +71,9 @@ type containerSchedules struct {
 	// about.
 	warned map[string]string
 	mu     sync.Mutex
+	// refreshing serializes refreshes, so an older listing never replaces a
+	// newer one.
+	refreshing sync.Mutex
 }
 
 // newContainerSchedules returns container schedules adding their entries to
@@ -151,6 +160,9 @@ func (c *containerSchedules) refresh(ctx context.Context) {
 	if c == nil || ctx.Err() != nil {
 		return
 	}
+
+	c.refreshing.Lock()
+	defer c.refreshing.Unlock()
 
 	containers, err := c.list(ctx)
 	if err != nil {
@@ -335,6 +347,51 @@ func (c *containerSchedules) spec(candidate filters.FilterableContainer) (string
 	}
 
 	return "", false
+}
+
+// following returns changes that also read the schedule labels again shortly
+// after containers start, so a new or recreated container's
+// schedule takes effect at once instead of after the next session. It
+// returns changes as is when container schedules or container events are
+// off.
+//
+// Parameters:
+//   - changes: Follows container changes (--watch-events), or nil.
+//
+// Returns:
+//   - ContainerChanges: changes, refreshing the schedules as they report.
+func (c *containerSchedules) following(changes ContainerChanges) ContainerChanges {
+	if c == nil || changes == nil {
+		return changes
+	}
+
+	return func(ctx context.Context, changed func(watch.Change)) {
+		var (
+			timerMu sync.Mutex
+			timer   *time.Timer
+		)
+
+		defer func() {
+			timerMu.Lock()
+			defer timerMu.Unlock()
+
+			if timer != nil {
+				timer.Stop()
+			}
+		}()
+
+		changes(ctx, func(change watch.Change) {
+			timerMu.Lock()
+			if timer == nil {
+				timer = time.AfterFunc(changedSettleDelay, func() { c.refresh(ctx) })
+			} else {
+				timer.Reset(changedSettleDelay)
+			}
+			timerMu.Unlock()
+
+			changed(change)
+		})
+	}
 }
 
 // ContainerLister is the part of the container client that container
