@@ -382,7 +382,7 @@ func RunUpgradesOnSchedule(ctx context.Context, deps ScheduleDeps) error {
 	}
 
 	// Containers started between scheduled runs, checked as they start.
-	stopStartedChecks := watchStarted(ctx, log, deps.ContainerChanges, func(due filters.Filter) {
+	stopStartedChecks := watchStarted(ctx, log, containers.following(deps.ContainerChanges), func(due filters.Filter) {
 		updateFunc(false, true, due)
 	})
 

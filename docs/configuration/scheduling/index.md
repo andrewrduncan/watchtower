@@ -104,7 +104,7 @@ services:
 
 - A container with a schedule label is checked for updates on its own schedule, and the global schedule checks the containers without one. Schedules that fire at the same moment, the global one included, share one update run.
 - Every run covers the containers Watchtower manages, as a global run does, but checks only the containers whose schedule fired. Dependencies work as in a global run: when a container is updated, the containers that depend on it restart with it, in dependency order, whatever their schedule. They are not checked for updates until their own schedule fires.
-- Watchtower reads the schedule labels at startup and after each update run, from the container list the run uses anyway. A new or changed label takes effect after the next run of any schedule.
+- Watchtower reads the schedule labels at startup and after each update run, from the container list the run uses anyway. A new or changed label takes effect after the next run of any schedule, or moments after the container starts with [watch events](#watch_events).
 - A label that does not parse is ignored with a warning, and the container follows the global schedule.
 - The other selection settings still apply: a labeled container in another [scope](../container-selection/index.md#scope_filter), or one not enabled when [label-enable](../container-selection/index.md#enable_label_filter) is set, is not updated.
 - Leaving out both [schedule](#schedule) and [interval](#interval) keeps the default global schedule, which checks the containers without a label once a day. To update only the containers with a schedule label, pass `--schedule ""` on the command line (an empty `WATCHTOWER_SCHEDULE` is ignored). [Update on start](#update_on_start) checks the containers on the global schedule.
@@ -129,6 +129,7 @@ Environment Variable: WATCHTOWER_WATCH_EVENTS
 - A container that Watchtower itself recreates in an update is new too, and is checked once more, which finds it up to date.
 - When the event stream is lost (when Docker restarts, for example), Watchtower reconnects, after a delay that grows to a minute, and picks up from the last event it saw.
 - With the [HTTP API](../http-api/index.md)'s update endpoint, these checks run only when [HTTP API periodic polls](#http_api_periodic_polls) are enabled, as scheduled runs do.
+- With [container schedules](#container_schedules), the schedule labels are also read again moments after a new container starts, so its schedule takes effect at once.
 - Requires access to Docker's event stream. Behind a Docker socket proxy, allow events (for example `EVENTS=1` for [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy){target="_blank" rel="noopener noreferrer"}).
 
 ## HTTP API Periodic Polls
