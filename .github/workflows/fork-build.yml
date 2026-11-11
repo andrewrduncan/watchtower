@@ -1,6 +1,6 @@
 # Builds this fork's image: nicholas-fedor/watchtower's latest release with the
-# per-container-schedule branch on top, tested, pushed to ghcr.io. When the
-# feature needs upstream changes newer than the release, it is built on
+# fork-features branch on top, tested, pushed to ghcr.io. When the
+# features need upstream changes newer than the release, it is built on
 # upstream's main instead (the image tag says which).
 #
 # Nothing is pushed to the repository: the feature is rebased onto the release
@@ -32,7 +32,7 @@ concurrency:
 
 env:
   UPSTREAM: https://github.com/nicholas-fedor/watchtower.git
-  FEATURE: per-container-schedule
+  FEATURE: fork-features
   IMAGE: ghcr.io/${{ github.repository_owner }}/watchtower
   ALERT_LABEL: sync-conflict
 
@@ -209,7 +209,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.base.outputs.feature }}
             org.opencontainers.image.version=${{ steps.base.outputs.key }}
-            org.opencontainers.image.description=Watchtower (${{ steps.base.outputs.base }}) with per-container schedules
+            org.opencontainers.image.description=Watchtower (${{ steps.base.outputs.base }}) with per-container schedules and container events
 
       - name: Close the alert
         if: success()
