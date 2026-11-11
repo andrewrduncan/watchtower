@@ -10,4 +10,6 @@ type Schedule struct {
 	UpdateOnStart bool
 	// ContainerSchedules lets containers set their own schedule with the schedule label.
 	ContainerSchedules bool
+	// WatchEvents follows Docker's container events to check new containers as they start.
+	WatchEvents bool
 }

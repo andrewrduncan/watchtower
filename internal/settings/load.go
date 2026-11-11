@@ -276,6 +276,7 @@ func loadSchedule(values *flagValues) schedule.Schedule {
 		UpdateOnStart:   values.Bool("update-on-start"),
 
 		ContainerSchedules: values.Bool("container-schedules"),
+		WatchEvents:        values.Bool("watch-events"),
 	}
 }
 
