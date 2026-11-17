@@ -9,7 +9,7 @@ name: Sync main with upstream
 
 on:
   schedule:
-    - cron: "41 * * * *" # hourly
+    - cron: "41 8 * * *" # daily, before the image build at 09:17
   workflow_dispatch:
 
 permissions:

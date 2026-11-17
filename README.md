@@ -204,7 +204,7 @@ Pin a specific tag if you want to choose when Watchtower itself changes.
 - `fork-features` is both, plus the small change that lets events refresh the
   schedules. It is what the image is built from.
 - `fork` (the default branch) holds this README and the build.
-- `main` mirrors upstream's `main`, kept identical every hour by
+- `main` mirrors upstream's `main`, kept identical daily by
   [`sync-main.yml`](.github/workflows/sync-main.yml).
 
 [`fork-build.yml`](.github/workflows/fork-build.yml) runs every day, and by
